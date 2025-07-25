@@ -1,72 +1,103 @@
 import streamlit as st
 import cv2
-import tempfile
-from PIL import Image
-from ultralytics import YOLO
 import numpy as np
+from PIL import Image
+import tempfile
+from ultralytics import YOLO
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+import av
+import os
 
-# Load YOLO model
+# Load YOLOv8 model
 model = YOLO("best.pt")  # Replace with your model path
 
-st.set_page_config(page_title="Helmet Detection App", layout="wide")
-st.title("🪖 Helmet Detection using YOLO")
+st.set_page_config(page_title="Helmet Detection", layout="wide")
+st.title("🪖 Helmet Detection using YOLOv8")
 
-# Function to perform detection
-def detect_frame(frame):
-    results = model(frame, imgsz=640, conf=0.5)
-    annotated_frame = results[0].plot()
-    return annotated_frame
+# YOLO prediction function
+def detect_image(img):
+    results = model(img, conf=0.5)
+    return results[0].plot()
 
-# Sidebar for input type
-input_type = st.sidebar.selectbox("Choose input type", ["Image", "Video", "Webcam"])
+# Sidebar for input choice
+input_option = st.sidebar.radio("Select Input Type", ["Image", "Video", "Webcam"])
 
-# ===================== IMAGE MODE =====================
-if input_type == "Image":
-    uploaded_image = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
-    if uploaded_image:
-        image = Image.open(uploaded_image).convert('RGB')
+# ======================================
+# IMAGE MODE
+# ======================================
+if input_option == "Image":
+    uploaded_img = st.file_uploader("Upload Image", type=["jpg", "jpeg", "png"])
+    if uploaded_img is not None:
+        image = Image.open(uploaded_img).convert("RGB")
+        img_np = np.array(image)
+
         st.image(image, caption="Uploaded Image", use_column_width=True)
-        with st.spinner("Detecting..."):
-            result_img = detect_frame(np.array(image))
-            st.image(result_img, caption="Detected Output", use_column_width=True)
 
-# ===================== VIDEO MODE =====================
-elif input_type == "Video":
-    uploaded_video = st.file_uploader("Upload a video", type=["mp4", "avi", "mov", "mkv"])
-    if uploaded_video:
+        if st.button("Run Detection"):
+            with st.spinner("Detecting..."):
+                result_img = detect_image(img_np)
+                st.image(result_img, caption="Detected Image", use_column_width=True)
+
+                # Save result
+                output_path = "output_image.jpg"
+                cv2.imwrite(output_path, cv2.cvtColor(result_img, cv2.COLOR_RGB2BGR))
+                with open(output_path, "rb") as file:
+                    st.download_button("Download Detected Image", file, "helmet_detected.jpg")
+
+# ======================================
+# VIDEO MODE
+# ======================================
+elif input_option == "Video":
+    uploaded_video = st.file_uploader("Upload Video", type=["mp4", "avi", "mov", "mkv"])
+    if uploaded_video is not None:
         tfile = tempfile.NamedTemporaryFile(delete=False)
         tfile.write(uploaded_video.read())
-        cap = cv2.VideoCapture(tfile.name)
+        video_path = tfile.name
 
-        stframe = st.empty()
-        st.info("Press stop to end video processing")
+        st.video(video_path)
 
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            detected_frame = detect_frame(frame)
-            stframe.image(detected_frame, channels="RGB")
+        if st.button("Run Detection on Video"):
+            cap = cv2.VideoCapture(video_path)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
 
-        cap.release()
+            out_path = "output_video.mp4"
+            out = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
-# ===================== WEBCAM MODE =====================
-elif input_type == "Webcam":
-    st.info("Turn on your webcam below")
-    run = st.checkbox("Start Webcam")
+            stframe = st.empty()
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                results = model(frame, conf=0.5)
+                annotated = results[0].plot()
+                out.write(annotated)
+                stframe.image(annotated, channels="RGB")
 
-    if run:
-        cap = cv2.VideoCapture(0)
-        stframe = st.empty()
+            cap.release()
+            out.release()
 
-        while run:
-            ret, frame = cap.read()
-            if not ret:
-                st.error("Failed to access webcam")
-                break
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            detected_frame = detect_frame(frame)
-            stframe.image(detected_frame, channels="RGB")
+            with open(out_path, "rb") as file:
+                st.download_button("Download Processed Video", file, "helmet_detected_video.mp4")
 
-        cap.release()
+# ======================================
+# WEBCAM MODE
+# ======================================
+elif input_option == "Webcam":
+    st.info("Allow browser webcam access below")
+
+    class YOLOVideoProcessor(VideoProcessorBase):
+        def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+            img = frame.to_ndarray(format="bgr24")
+            results = model(img, conf=0.3)
+            annotated = results[0].plot()
+            return av.VideoFrame.from_ndarray(annotated, format="bgr24")
+
+    webrtc_streamer(
+        key="helmet-webcam",
+        mode=WebRtcMode.SENDRECV,
+        video_processor_factory=YOLOVideoProcessor,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+    )
